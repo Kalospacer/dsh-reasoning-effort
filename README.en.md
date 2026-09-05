@@ -8,13 +8,15 @@
 
 [中文首页](README.md) · [Latest release](https://github.com/HanaAyane/dsh-reasoning-effort/releases/latest) · [Report an issue](https://github.com/HanaAyane/dsh-reasoning-effort/issues)
 
-[![main 0.6.2](https://img.shields.io/badge/main-0.6.2-6f83ff?style=flat-square)](https://github.com/HanaAyane/dsh-reasoning-effort/tree/main)
+[![main 0.7.0](https://img.shields.io/badge/main-0.7.0-6f83ff?style=flat-square)](https://github.com/HanaAyane/dsh-reasoning-effort/tree/main)
 [![DSH 0.1.0-rc.6](https://img.shields.io/badge/DSH-0.1.0--rc.6-8b5cf6?style=flat-square)](https://github.com/deepseek-ai/deepseek-harness)
 [![MIT License](https://img.shields.io/badge/license-MIT-536990?style=flat-square)](LICENSE)
 
 </div>
 
 On first launch, the plugin adds a combined model control below the DSH composer. Open it to find the reasoning-effort slider, whose levels adapt to whatever the selected model exposes, above the familiar model picker. The plugin is enabled by default and stays synchronized with DSH's `/model` command.
+
+The runtime UI ships in Simplified Chinese and English and follows the DSH language selected under **Settings → General** immediately. The model menu, settings rows, accessibility labels, knowledge-base notes, warnings, and copy-ready YAML comments switch together without a page reload.
 
 ## First use in three steps
 
@@ -46,7 +48,7 @@ dsh plugin --profile web add github:HanaAyane/dsh-reasoning-effort#main
 dsh --profile web --dump-config
 ```
 
-`main` is currently versioned `0.5.0`, matching the latest release tag `v0.5.0`. `#main` always installs the newest code (which may later include unreleased changes); replace `#main` with `#v0.5.0` to pin this release.
+`main` is currently versioned `0.7.0`, matching the latest release tag `v0.7.0`. `#main` always installs the newest code (which may later include unreleased changes); replace `#main` with `#v0.7.0` to pin this release.
 
 ### 2. Restart the DSH Web Host
 
