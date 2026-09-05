@@ -1154,12 +1154,12 @@ export function apply(ctx: ClientContext) {
       disposeModelSeat = ctx.slots.register(
         {
           name: SLOT,
-          // `conversation.input.model` is single-occupancy and the renderer
-          // elects its winner by `order` alone — `options.priority` is read
-          // nowhere in dsh-client-ui-renderer, so ordering ahead of the
-          // built-in seat (which registers at the default order 0) is what
-          // puts this control in the composer.
-          order: -100,
+          // `conversation.input.model` is single-occupancy: the registry sorts
+          // entries by `priority` first (then `order`) and the lowest renders,
+          // so this shadows the built-in seat at the default priority 0.
+          // Two registrations at the SAME priority are rejected outright, so
+          // this cannot be dropped or turned into an `order`.
+          priority: -100,
           locale: NS,
           inject: (sessionId: SessionId) => {
             const controller = modelDirectories.directoryFor(sessionId)
