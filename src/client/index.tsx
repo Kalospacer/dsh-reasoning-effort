@@ -12,12 +12,9 @@
  */
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent } from 'react'
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
-import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
-import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ModelSelection, SessionId } from '@deepseek-ai/dsh-api-remotes/client'
 import type {
   ModelDirectory,
@@ -32,6 +29,35 @@ import {
   type ReasoningEffortTranslate,
 } from './locales.js'
 import { CSS } from './styles.js'
+
+/*
+ * `@deepseek-ai/dsh-client-runtime` and `@deepseek-ai/dsh-client-ui-slots` were
+ * merged into the Harness's other client packages and no longer resolve, so the
+ * three types this file took from them are declared here instead. All three were
+ * `import type`-only, so nothing below changes what the bundle emits.
+ */
+
+/** A `useSyncExternalStore`-shaped read model. */
+interface SnapshotStore<T> {
+  getSnapshot(): T
+  subscribe(listener: () => void): () => void
+}
+
+/** The standard locale seat every slot component receives. */
+type PropsLocale<Ns extends string> = { readonly t: ReasoningEffortTranslate } & { readonly __ns?: Ns }
+
+/** The client `Context` members this plugin uses. */
+interface ClientContext {
+  get(name: string): unknown
+  effect(setup: () => (() => void) | void, label?: string): () => void
+  readonly locale: {
+    register(ns: string, dicts: Record<string, unknown>): () => void
+  }
+  readonly slots: {
+    inject(name: string, mount: () => (() => void) | void): void
+    register(spec: Record<string, unknown>, component: (props: any) => unknown): () => void
+  }
+}
 
 /** One selectable effort exactly as the owning adapter advertised it. */
 interface EffortLevel {
@@ -1122,7 +1148,12 @@ export function apply(ctx: ClientContext) {
       disposeModelSeat = ctx.slots.register(
         {
           name: SLOT,
-          priority: -100,
+          // `conversation.input.model` is a single-occupancy slot, and the
+          // renderer elects its winner by `order` alone — `priority` is not
+          // read. Sorting ahead of the built-in seat (which registers at the
+          // default order 0) is what puts this control in the composer;
+          // without it the built-in picker wins and this row never renders.
+          order: -100,
           locale: NS,
           inject: (sessionId: SessionId) => {
             const controller = modelDirectories.directoryFor(sessionId)

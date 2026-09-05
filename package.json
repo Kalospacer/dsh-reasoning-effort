@@ -71,13 +71,11 @@
     },
     "client": {
       "inject": [
-        "@deepseek-ai/dsh-client-runtime",
         "@deepseek-ai/dsh-client-connection",
         "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-ui-conversation",
         "@deepseek-ai/dsh-client-ui-model-selection",
         "@deepseek-ai/dsh-client-ui-settings",
-        "@deepseek-ai/dsh-client-ui-slots",
         "@deepseek-ai/dsh-api-remotes"
       ],
       "platform": "web"
@@ -86,13 +84,11 @@
   "peerDependencies": {
     "react": "^18.2.0",
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-client-runtime": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-client-connection": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-client-locale": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-client-ui-conversation": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-client-ui-model-selection": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-client-ui-settings": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-client-ui-slots": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-api-remotes": "^0.1.0-rc.6"
   },
   "dependencies": {
@@ -104,13 +100,11 @@
     "@types/react": "~18.3.1",
     "react": "^18.2.0",
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-client-runtime": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-client-connection": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-client-locale": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-client-ui-conversation": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-client-ui-model-selection": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-client-ui-settings": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-client-ui-slots": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-api-remotes": "^0.1.0-rc.6"
   },
   "license": "MIT"
