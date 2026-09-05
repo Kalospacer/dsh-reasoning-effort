@@ -1148,12 +1148,17 @@ export function apply(ctx: ClientContext) {
       disposeModelSeat = ctx.slots.register(
         {
           name: SLOT,
-          // `conversation.input.model` is a single-occupancy slot, and the
-          // renderer elects its winner by `order` alone — `priority` is not
-          // read. Sorting ahead of the built-in seat (which registers at the
-          // default order 0) is what puts this control in the composer;
-          // without it the built-in picker wins and this row never renders.
-          order: -100,
+          // `conversation.input.model` is single-occupancy and the renderer
+          // elects its winner by `order` alone (`options.priority` is read
+          // nowhere in dsh-client-ui-renderer), so ordering ahead of the
+          // built-in seat is what would put this control in the composer.
+          //
+          // It is deliberately NOT ordered ahead yet: winning the slot on
+          // 0.1.2-rc.1 renders an empty cell rather than this control, which
+          // leaves the composer with no model selector at all — strictly worse
+          // than losing the slot. Restore `order: -100` together with whatever
+          // makes the seat render again.
+          priority: -100,
           locale: NS,
           inject: (sessionId: SessionId) => {
             const controller = modelDirectories.directoryFor(sessionId)
