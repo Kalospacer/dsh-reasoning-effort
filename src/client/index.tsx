@@ -10,12 +10,17 @@
  *
  * @module dsh-reasoning-effort/client
  */
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent } from 'react'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
+import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
-import type { ModelSelection, SessionId } from '@deepseek-ai/dsh-api-remotes/client'
+import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
+import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
+import type { ModelSelection } from '@deepseek-ai/dsh-api-session-controller/types'
 import type {
   ModelDirectory,
   ModelDirectoryResolver,
@@ -29,35 +34,11 @@ import {
   type ReasoningEffortTranslate,
 } from './locales.js'
 import { CSS } from './styles.js'
-
-/*
- * `@deepseek-ai/dsh-client-runtime` and `@deepseek-ai/dsh-client-ui-slots` were
- * merged into the Harness's other client packages and no longer resolve, so the
- * three types this file took from them are declared here instead. All three were
- * `import type`-only, so nothing below changes what the bundle emits.
- */
-
-/** A `useSyncExternalStore`-shaped read model. */
-interface SnapshotStore<T> {
-  getSnapshot(): T
-  subscribe(listener: () => void): () => void
-}
-
-/** The standard locale seat every slot component receives. */
-type PropsLocale<Ns extends string> = { readonly t: ReasoningEffortTranslate } & { readonly __ns?: Ns }
-
-/** The client `Context` members this plugin uses. */
-interface ClientContext {
-  get(name: string): unknown
-  effect(setup: () => (() => void) | void, label?: string): () => void
-  readonly locale: {
-    register(ns: string, dicts: Record<string, unknown>): () => void
-  }
-  readonly slots: {
-    inject(name: string, mount: () => (() => void) | void): void
-    register(spec: Record<string, unknown>, component: (props: any) => unknown): () => void
-  }
-}
+import { positionModelMenu } from './menu-position.js'
+// Agent briefs inlined as text at build time; the copied document picks one by
+// the active locale.
+import agentTutorialEn from './agent-tutorial.en.md'
+import agentTutorialZh from './agent-tutorial.zh.md'
 
 /** One selectable effort exactly as the owning adapter advertised it. */
 interface EffortLevel {
@@ -90,11 +71,12 @@ interface AdaptGuidance {
   readonly mode: 'replace' | 'insert'
   readonly noteKey: 'glm52' | 'kimiK3' | null
   readonly note: string | null
-  readonly warning: 'aliyunDeveloperRole' | null
+  readonly warning: 'developerRole' | null
   readonly entryHead: string | null
   readonly fieldBlock: string | null
   readonly entryLine: string
   readonly entryPath: string
+  readonly modelIndent: number
   readonly settingsPath: string | null
 }
 
@@ -122,17 +104,32 @@ function levelsText(levels: readonly string[], t: ReasoningEffortTranslate): str
   return levels.length === 0 ? t('level.none') : levels.map((level) => levelName(level, t)).join(' / ')
 }
 
-/** Localized field-block template for a model the knowledge base does not know. */
-function templateSnippet(t: ReasoningEffortTranslate): string {
+/**
+ * Localized field-block template for a model the knowledge base does not know.
+ *
+ * `compat` stays a commented example rather than a written block: a guessed
+ * `thinkingFormat` is worse than none, because the endpoint then receives a
+ * switch it does not read, while an absent `compat` lets the adapter apply its
+ * own base-URL detection (which is what an unrecognized OpenAI-compatible
+ * endpoint wants anyway, and the correct vendor format for a recognized one).
+ */
+function templateSnippet(t: ReasoningEffortTranslate, modelIndent: number): string {
+  const fieldPrefix = ' '.repeat(modelIndent + 2)
+  const valuePrefix = ' '.repeat(modelIndent + 4)
   return [
-    '          reasoningEfforts:',
-    `            low: "low"        # ${t('yaml.keyComment')}`,
-    `            high: "high"      # ${t('yaml.valueComment')}`,
-    `          # ${t('yaml.compatComment')}`,
-    '          compat:',
-    '            thinkingFormat: "openai"',
-    '            supportsReasoningEffort: true',
+    `${fieldPrefix}reasoningEfforts:`,
+    `${valuePrefix}low: "low"        # ${t('yaml.keyComment')}`,
+    `${valuePrefix}high: "high"      # ${t('yaml.valueComment')}`,
+    `${fieldPrefix}# ${t('yaml.compatComment')}`,
+    `${fieldPrefix}# compat:`,
+    `${fieldPrefix}#   thinkingFormat: "qwen"`,
+    `${fieldPrefix}#   supportsReasoningEffort: false`,
+    `${fieldPrefix}#   supportsDeveloperRole: false`,
   ].join('\n')
+}
+
+function configDocumentName(path: string | null): string {
+  return path?.split(/[\\/]/u).at(-1) || 'settings.yaml'
 }
 
 function guidanceNote(guidance: AdaptGuidance, t: ReasoningEffortTranslate): string {
@@ -143,12 +140,49 @@ function guidanceNote(guidance: AdaptGuidance, t: ReasoningEffortTranslate): str
 }
 
 function guidanceWarning(guidance: AdaptGuidance, t: ReasoningEffortTranslate): string | null {
-  return guidance.warning === 'aliyunDeveloperRole' ? t('warning.aliyunDeveloperRole') : null
+  return guidance.warning === 'developerRole' ? t('warning.developerRole') : null
 }
 
 function guidanceSnippet(guidance: AdaptGuidance, t: ReasoningEffortTranslate): string {
-  const block = guidance.fieldBlock ?? templateSnippet(t)
+  const block = guidance.fieldBlock ?? templateSnippet(t, guidance.modelIndent)
   return guidance.entryHead === null ? block : `${guidance.entryHead}\n${block}`
+}
+
+/**
+ * Copy observed model/configuration facts and vendor-neutral declaration rules.
+ * Knowledge-base suggestions are excluded: the recipient verifies the endpoint.
+ * The rules themselves live in the markdown briefs so they can be reviewed and
+ * revised as documents rather than as dictionary strings.
+ */
+function agentBrief(
+  guidance: AdaptGuidance,
+  tutorial: string,
+  t: ReasoningEffortTranslate,
+): string {
+  const facts = t('agent.facts', {
+    provider: guidance.provider,
+    model: guidance.model,
+    path: guidance.settingsPath ?? t('agent.configUnknown'),
+    entryPath: guidance.entryPath,
+    entryLine: guidance.entryLine,
+    current: levelsText(guidance.current, t),
+  })
+  return [
+    t('agent.intro'),
+    '',
+    t('agent.factsHeading'),
+    facts,
+    '',
+    t('agent.task'),
+    '',
+    '---',
+    '',
+    tutorial.replace(/\r\n/gu, '\n')
+      .replaceAll('{{CONFIG_FILE}}', guidance.settingsPath ?? t('agent.configUnknown'))
+      .replaceAll('{{ENTRY_PATH}}', guidance.entryPath)
+      .trim(),
+    '',
+  ].join('\n')
 }
 
 /** Wrap the Host RPC channel in typed helpers; null while the Host half is absent. */
@@ -189,6 +223,11 @@ async function copyText(text: string): Promise<boolean> {
   }
 }
 
+/** The slice of the locale service this half reads: the active language id. */
+interface LocaleRuntimeLike {
+  getLocale(): { active: string }
+}
+
 interface ModelSeatInjectedProps {
   readonly locked: boolean
   readonly available: boolean
@@ -197,6 +236,8 @@ interface ModelSeatInjectedProps {
   readonly load: () => void
   readonly select: (selection: ModelSelection) => Promise<boolean>
   readonly adapt: AdaptationService | null
+  /** Rules document for the active locale, read at copy time. */
+  readonly agentTutorial: () => string
 }
 
 type ModelSeatProps = ModelSeatInjectedProps & PropsLocale<typeof NS>
@@ -206,12 +247,6 @@ const SETTINGS_SLOT = 'settings.general.item'
 const ENABLED_STORAGE_KEY = 'dsh-reasoning-effort.enabled'
 const LEGACY_ENABLED_STORAGE_KEY = '@dsh-external/dsh-reasoning-effort.enabled'
 const CHIBI_THUMB_STORAGE_KEY = 'dsh-reasoning-effort.chibi-thumb'
-// `remote` and `remote.session` are not used directly here, but
-// `modelDirectories.directoryFor()` reaches `ctx.remote.session` through the
-// CALLING context, and cordis refuses a service property the caller did not
-// declare ("cannot get property \"remote.session\" without inject"). The seat's
-// inject runs in this plugin's context, so the declaration has to live here —
-// the same list the built-in model-selection plugin carries.
 export const inject = ['slots', 'modelDirectories', 'connection', 'locale', 'remote', 'remote.session']
 
 function readEnabledPreference(): boolean {
@@ -566,15 +601,7 @@ function EffortSlider({ directory, t }: { directory: ModelDirectory; t: Reasonin
     }
 
     try {
-      const models = await directory.load()
-      const fresh: ModelDirectoryState = {
-        current: models.current,
-        routable: models.routable,
-        groups: models.groups,
-        failures: models.failures,
-        status: 'ready',
-        error: null,
-      }
+      const fresh = await directory.load()
       const freshLevels = sliderLevels(fresh)
       const index = clampIndex(raw, freshLevels.length)
       const next = freshLevels[index]?.id
@@ -584,11 +611,13 @@ function EffortSlider({ directory, t }: { directory: ModelDirectory; t: Reasonin
       setPreview(index)
       setEffort(next)
 
-      await directory.select({
-        provider: models.current.provider,
-        model: models.current.model,
+      if (fresh.current === null) throw new Error(t('effort.unavailable'))
+      const result = await directory.select({
+        provider: fresh.current.provider,
+        model: fresh.current.model,
         reasoningEffort: next,
       })
+      if (!result.ok) throw result.error
 
       const snapshot = directory.store.getSnapshot()
       const accepted = effortIndex(freshLevels, snapshot.current?.reasoningEffort)
@@ -776,6 +805,7 @@ function AdvancedModelSelect({
   load,
   select,
   adapt,
+  agentTutorial,
   t,
 }: ModelSeatProps) {
   const state = useSyncExternalStore(
@@ -784,17 +814,30 @@ function AdvancedModelSelect({
   )
   const [open, setOpen] = useState(false)
   const [modelsOpen, setModelsOpen] = useState(false)
-  const [guidance, setGuidance] = useState<AdaptGuidance | null>(null)
+  const [guidanceResult, setGuidanceResult] = useState<AdaptGuidance | null>(null)
   const [guidanceBusy, setGuidanceBusy] = useState(false)
+  const [guidanceFailed, setGuidanceFailed] = useState(false)
   const [panelOpen, setPanelOpen] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [agentCopied, setAgentCopied] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => {
+    if (!open || rootRef.current === null || menuRef.current === null) return
+    return positionModelMenu(rootRef.current, menuRef.current)
+  }, [open])
   const choice = currentModel(state)
   const levels = sliderLevels(state)
   const effortName = levels[effectiveEffortIndex(levels, state)]?.name ?? t('model.defaultEffort')
   const modelLabel = choice?.name ?? state.current?.model ?? t('model.select')
   const busy = state.status === 'loading' || state.status === 'selecting'
+  const provider = state.current?.provider
+  const modelId = state.current?.model
+  // Hide a previous model's result during the render before the effect clears it.
+  const guidance = guidanceResult?.provider === provider && guidanceResult?.model === modelId
+    ? guidanceResult
+    : null
   const localizedNote = guidance === null ? '' : guidanceNote(guidance, t)
   const localizedWarning = guidance === null ? null : guidanceWarning(guidance, t)
   const localizedSnippet = guidance === null ? '' : guidanceSnippet(guidance, t)
@@ -816,25 +859,37 @@ function AdvancedModelSelect({
     return () => document.removeEventListener('mousedown', closeOutside)
   }, [open])
 
-  const provider = state.current?.provider
-  const modelId = state.current?.model
-
   useEffect(() => {
-    if (adapt === null || provider === undefined || modelId === undefined) {
-      setGuidance(null)
-      setPanelOpen(false)
+    // A brief belongs to the model it describes; never let a stale one be copied.
+    setGuidanceResult(null)
+    setCopied(false)
+    setAgentCopied(false)
+    setPanelOpen(false)
+    if (provider === undefined || modelId === undefined) {
+      setGuidanceBusy(false)
+      setGuidanceFailed(false)
+      return
+    }
+    // Without a channel the diagnosis cannot run at all; saying so beats
+    // rendering nothing, which reads as "this model needs no guidance".
+    if (adapt === null) {
+      setGuidanceBusy(false)
+      setGuidanceFailed(true)
       return
     }
     let cancelled = false
     setGuidanceBusy(true)
+    setGuidanceFailed(false)
     adapt.diagnose(provider, modelId).then((result) => {
       if (cancelled) return
-      setGuidance(result)
+      setGuidanceResult(result)
+      setGuidanceFailed(result === null)
       setGuidanceBusy(false)
       if (result === null || !result.needsGuide) setPanelOpen(false)
     }, () => {
       if (cancelled) return
-      setGuidance(null)
+      setGuidanceResult(null)
+      setGuidanceFailed(true)
       setGuidanceBusy(false)
     })
     return () => {
@@ -896,7 +951,7 @@ function AdvancedModelSelect({
       </button>
 
       {open ? (
-        <div className="re-model-menu" role="menu" aria-label={t('model.menuAria')} aria-busy={busy}>
+        <div ref={menuRef} className="re-model-menu" role="menu" aria-label={t('model.menuAria')} aria-busy={busy}>
           {modelsOpen ? (
             <div className="re-model-pane">
               <button type="button" className="re-model-back" onClick={() => setModelsOpen(false)}>
@@ -976,6 +1031,14 @@ function AdvancedModelSelect({
                             <span className="re-adapt-arrow">{levelsText(guidance.expected, t)}</span>
                           </div>
                         ) : null}
+                        <div className="re-adapt-howto">{t('guidance.howto')}</div>
+                        <div className="re-adapt-switch-intro">{t('guidance.switch.intro')}</div>
+                        <ul className="re-adapt-switches">
+                          <li>{t('guidance.switch.thinkingFormat')}</li>
+                          <li>{t('guidance.switch.reasoningEffort')}</li>
+                          <li>{t('guidance.switch.developerRole')}</li>
+                          <li>{t('guidance.switch.replay')}</li>
+                        </ul>
                         {localizedWarning === null ? null : (
                           <div className="re-adapt-warning">{localizedWarning}</div>
                         )}
@@ -983,7 +1046,7 @@ function AdvancedModelSelect({
                         <pre className="re-adapt-yaml">{localizedSnippet}</pre>
                         <div className="re-adapt-steps">
                           <span>
-                            {t('guidance.step1.open')}<code>settings.yaml</code>
+                            {t('guidance.step1.open')}<code>{configDocumentName(guidance.settingsPath)}</code>
                             {guidance.settingsPath === null ? '' : t('guidance.step1.path', { path: guidance.settingsPath })}
                             {t('guidance.step1.find')}<code>{guidance.entryPath}</code>
                             {t('guidance.step1.list')}<code>{guidance.entryLine}</code>{t('guidance.step1.end')}
@@ -1006,11 +1069,23 @@ function AdvancedModelSelect({
                         <button
                           type="button"
                           className="re-adapt-apply"
+                          disabled={busy || guidanceBusy}
                           onClick={() => {
                             void copyText(localizedSnippet).then((ok) => setCopied(ok))
                           }}
                         >
                           {copied ? t('guidance.copied') : t('guidance.copy')}
+                        </button>
+                        <button
+                          type="button"
+                          className="re-adapt-agent"
+                          disabled={busy || guidanceBusy}
+                          onClick={() => {
+                            void copyText(agentBrief(guidance, agentTutorial(), t))
+                              .then((ok) => setAgentCopied(ok))
+                          }}
+                        >
+                          {agentCopied ? t('guidance.copied') : t('agent.copy')}
                         </button>
                         <button type="button" className="re-adapt-cancel" onClick={() => setPanelOpen(false)}>
                           {t('guidance.collapse')}
@@ -1018,12 +1093,44 @@ function AdvancedModelSelect({
                       </div>
                     </div>
                   ) : (
-                    <button type="button" className="re-adapt-open" onClick={() => { setCopied(false); setPanelOpen(true) }}>
-                      {guidanceBusy ? t('guidance.checking') : t('guidance.open')}
-                    </button>
+                    <div className="re-adapt-open-row">
+                      <button type="button" className="re-adapt-open" onClick={() => { setCopied(false); setPanelOpen(true) }}>
+                        {guidanceBusy ? t('guidance.checking') : t('guidance.open')}
+                      </button>
+                      <button
+                        type="button"
+                        className="re-adapt-agent"
+                        disabled={busy || guidanceBusy}
+                        onClick={() => {
+                          void copyText(agentBrief(guidance, agentTutorial(), t))
+                            .then((ok) => setAgentCopied(ok))
+                        }}
+                      >
+                        {agentCopied ? t('guidance.copied') : t('agent.copy')}
+                      </button>
+                    </div>
                   )}
                 </div>
               ) : null}
+              {guidance !== null && guidance.userDeclared && !guidance.needsGuide ? (
+                <div className="re-adapt">
+                  <div className="re-adapt-desc">{t('agent.customize')}</div>
+                  <div className="re-adapt-open-row">
+                    <button
+                      type="button"
+                      className="re-adapt-agent"
+                      disabled={busy || guidanceBusy}
+                      onClick={() => {
+                        void copyText(agentBrief(guidance, agentTutorial(), t))
+                          .then((ok) => setAgentCopied(ok))
+                      }}
+                    >
+                      {agentCopied ? t('guidance.copied') : t('agent.copy')}
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+              {guidanceFailed ? <div className="re-model-status" role="status">{t('guidance.unavailable')}</div> : null}
               <div className="re-menu-separator" />
               <button
                 type="button"
@@ -1105,6 +1212,7 @@ export function apply(ctx: ClientContext) {
 
   const connection = ctx.get('connection') as { rpc?: HostRpc } | undefined
   const adapt = makeAdaptationService(connection?.rpc)
+  const locale = ctx.get('locale') as LocaleRuntimeLike | undefined
 
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'reasoning-effort: dictionaries')
 
@@ -1154,22 +1262,20 @@ export function apply(ctx: ClientContext) {
       disposeModelSeat = ctx.slots.register(
         {
           name: SLOT,
-          // `conversation.input.model` is single-occupancy: the registry sorts
-          // entries by `priority` first (then `order`) and the lowest renders,
-          // so this shadows the built-in seat at the default priority 0.
-          // Two registrations at the SAME priority are rejected outright, so
-          // this cannot be dropped or turned into an `order`.
           priority: -100,
           locale: NS,
-          inject: (sessionId: SessionId) => {
-            const controller = modelDirectories.directoryFor(sessionId)
+          inject: (sessionId: string) => {
+            const controller = modelDirectories.directoryFor(sessionId as SessionId)
             return {
               available: true,
               controller,
               directory: controller.store,
               load: () => controller.load().then(() => undefined, () => undefined),
-              select: (selection: ModelSelection) => controller.select(selection).then(() => true, () => false),
+              select: (selection: ModelSelection) => controller.select(selection).then((result) => result.ok, () => false),
               adapt,
+              // Read at copy time: a language switch must change the next copy,
+              // not require the seat to remount.
+              agentTutorial: () => (locale?.getLocale().active === 'zh' ? agentTutorialZh : agentTutorialEn),
             }
           },
         },
