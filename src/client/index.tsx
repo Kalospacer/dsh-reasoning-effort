@@ -10,25 +10,44 @@
  *
  * @module dsh-reasoning-effort/client
  */
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent } from 'react'
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
-import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
+import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
+import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
-import type { ModelSelection, SessionId } from '@deepseek-ai/dsh-api-remotes/client'
+import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
+import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
+import type { ModelSelection } from '@deepseek-ai/dsh-api-session-controller/types'
 import type {
   ModelDirectory,
   ModelDirectoryResolver,
   ModelDirectoryState,
 } from '@deepseek-ai/dsh-client-ui-model-selection/client'
+import {
+  en,
+  NS,
+  zh,
+  type ReasoningEffortLocaleKey,
+  type ReasoningEffortTranslate,
+} from './locales.js'
 import { CSS } from './styles.js'
-
-/** One selectable effort exactly as the owning adapter advertised it. */
-interface EffortLevel {
-  readonly id: string
-  readonly name: string
-}
+import { positionModelMenu } from './menu-position.js'
+import {
+  clampIndex,
+  currentModel,
+  effectiveEffortIndex,
+  effortIndex,
+  pendingEffortIndex,
+  selectEffort,
+  sliderLevels,
+} from './effort-selection.js'
+// Agent briefs inlined as text at build time; the copied document picks one by
+// the active locale.
+import agentTutorialEn from './agent-tutorial.en.md'
+import agentTutorialZh from './agent-tutorial.zh.md'
 
 /** Host RPC result envelope (matches `@deepseek-ai/dsh-host-apiproxy`). */
 type ReRpcResult<T> =
@@ -53,11 +72,14 @@ interface AdaptGuidance {
   readonly expected: string[]
   readonly matched: boolean
   readonly mode: 'replace' | 'insert'
+  readonly noteKey: 'glm52' | 'kimiK3' | null
   readonly note: string | null
-  readonly warning: string | null
-  readonly snippet: string
+  readonly warning: 'developerRole' | null
+  readonly entryHead: string | null
+  readonly fieldBlock: string | null
   readonly entryLine: string
   readonly entryPath: string
+  readonly modelIndent: number
   readonly settingsPath: string | null
 }
 
@@ -66,22 +88,104 @@ interface AdaptationService {
   diagnose(provider: string, model: string): Promise<AdaptGuidance | null>
 }
 
-const LEVEL_NAMES: Record<string, string> = {
-  off: '关闭',
-  minimal: '极低',
-  low: '低',
-  medium: '中',
-  high: '高',
-  xhigh: '极高',
-  max: '最大',
+const LEVEL_NAME_KEYS: Record<string, ReasoningEffortLocaleKey> = {
+  off: 'level.off',
+  minimal: 'level.minimal',
+  low: 'level.low',
+  medium: 'level.medium',
+  high: 'level.high',
+  xhigh: 'level.xhigh',
+  max: 'level.max',
 }
 
-function levelName(level: string): string {
-  return LEVEL_NAMES[level] ?? level
+function levelName(level: string, t: ReasoningEffortTranslate): string {
+  const key = LEVEL_NAME_KEYS[level]
+  return key === undefined ? level : t(key)
 }
 
-function levelsText(levels: readonly string[]): string {
-  return levels.length === 0 ? '无档位' : levels.map((level) => levelName(level)).join(' / ')
+function levelsText(levels: readonly string[], t: ReasoningEffortTranslate): string {
+  return levels.length === 0 ? t('level.none') : levels.map((level) => levelName(level, t)).join(' / ')
+}
+
+/**
+ * Localized field-block template for a model the knowledge base does not know.
+ *
+ * `compat` stays a commented example rather than a written block: a guessed
+ * `thinkingFormat` is worse than none, because the endpoint then receives a
+ * switch it does not read, while an absent `compat` lets the adapter apply its
+ * own base-URL detection (which is what an unrecognized OpenAI-compatible
+ * endpoint wants anyway, and the correct vendor format for a recognized one).
+ */
+function templateSnippet(t: ReasoningEffortTranslate, modelIndent: number): string {
+  const fieldPrefix = ' '.repeat(modelIndent + 2)
+  const valuePrefix = ' '.repeat(modelIndent + 4)
+  return [
+    `${fieldPrefix}reasoningEfforts:`,
+    `${valuePrefix}low: "low"        # ${t('yaml.keyComment')}`,
+    `${valuePrefix}high: "high"      # ${t('yaml.valueComment')}`,
+    `${fieldPrefix}# ${t('yaml.compatComment')}`,
+    `${fieldPrefix}# compat:`,
+    `${fieldPrefix}#   thinkingFormat: "qwen"`,
+    `${fieldPrefix}#   supportsReasoningEffort: false`,
+    `${fieldPrefix}#   supportsDeveloperRole: false`,
+  ].join('\n')
+}
+
+function configDocumentName(path: string | null): string {
+  return path?.split(/[\\/]/u).at(-1) || 'settings.yaml'
+}
+
+function guidanceNote(guidance: AdaptGuidance, t: ReasoningEffortTranslate): string {
+  if (guidance.note !== null) return guidance.note
+  if (guidance.noteKey === 'glm52') return t('knowledge.glm52')
+  if (guidance.noteKey === 'kimiK3') return t('knowledge.kimiK3')
+  return t('knowledge.unknown')
+}
+
+function guidanceWarning(guidance: AdaptGuidance, t: ReasoningEffortTranslate): string | null {
+  return guidance.warning === 'developerRole' ? t('warning.developerRole') : null
+}
+
+function guidanceSnippet(guidance: AdaptGuidance, t: ReasoningEffortTranslate): string {
+  const block = guidance.fieldBlock ?? templateSnippet(t, guidance.modelIndent)
+  return guidance.entryHead === null ? block : `${guidance.entryHead}\n${block}`
+}
+
+/**
+ * Copy observed model/configuration facts and vendor-neutral declaration rules.
+ * Knowledge-base suggestions are excluded: the recipient verifies the endpoint.
+ * The rules themselves live in the markdown briefs so they can be reviewed and
+ * revised as documents rather than as dictionary strings.
+ */
+function agentBrief(
+  guidance: AdaptGuidance,
+  tutorial: string,
+  t: ReasoningEffortTranslate,
+): string {
+  const facts = t('agent.facts', {
+    provider: guidance.provider,
+    model: guidance.model,
+    path: guidance.settingsPath ?? t('agent.configUnknown'),
+    entryPath: guidance.entryPath,
+    entryLine: guidance.entryLine,
+    current: levelsText(guidance.current, t),
+  })
+  return [
+    t('agent.intro'),
+    '',
+    t('agent.factsHeading'),
+    facts,
+    '',
+    t('agent.task'),
+    '',
+    '---',
+    '',
+    tutorial.replace(/\r\n/gu, '\n')
+      .replaceAll('{{CONFIG_FILE}}', guidance.settingsPath ?? t('agent.configUnknown'))
+      .replaceAll('{{ENTRY_PATH}}', guidance.entryPath)
+      .trim(),
+    '',
+  ].join('\n')
 }
 
 /** Wrap the Host RPC channel in typed helpers; null while the Host half is absent. */
@@ -122,7 +226,12 @@ async function copyText(text: string): Promise<boolean> {
   }
 }
 
-interface ModelSeatProps {
+/** The slice of the locale service this half reads: the active language id. */
+interface LocaleRuntimeLike {
+  getLocale(): { active: string }
+}
+
+interface ModelSeatInjectedProps {
   readonly locked: boolean
   readonly available: boolean
   readonly controller: ModelDirectory
@@ -130,14 +239,18 @@ interface ModelSeatProps {
   readonly load: () => void
   readonly select: (selection: ModelSelection) => Promise<boolean>
   readonly adapt: AdaptationService | null
+  /** Rules document for the active locale, read at copy time. */
+  readonly agentTutorial: () => string
 }
+
+type ModelSeatProps = ModelSeatInjectedProps & PropsLocale<typeof NS>
 
 const SLOT = 'conversation.input.model'
 const SETTINGS_SLOT = 'settings.general.item'
 const ENABLED_STORAGE_KEY = 'dsh-reasoning-effort.enabled'
 const LEGACY_ENABLED_STORAGE_KEY = '@dsh-external/dsh-reasoning-effort.enabled'
 const CHIBI_THUMB_STORAGE_KEY = 'dsh-reasoning-effort.chibi-thumb'
-export const inject = ['slots', 'modelDirectories', 'connection']
+export const inject = ['slots', 'modelDirectories', 'connection', 'locale', 'remote', 'remote.session']
 
 function readEnabledPreference(): boolean {
   try {
@@ -202,43 +315,6 @@ const chibiThumbStore = {
     }
     chibiThumbListeners.forEach((listener) => listener())
   },
-}
-
-function currentModel(state: ModelDirectoryState) {
-  if (state.current === null) return undefined
-  const group = state.groups.find((candidate) => candidate.id === state.current?.provider)
-  return group?.models.find((candidate) => candidate.id === state.current?.model)
-}
-
-/**
- * Effort levels the current model advertises, in adapter order. A model needs
- * at least two before a slider says anything a plain label would not, so
- * fewer-than-two collapses to none.
- */
-function sliderLevels(state: ModelDirectoryState): readonly EffortLevel[] {
-  const efforts = currentModel(state)?.reasoning?.efforts
-  return efforts !== undefined && efforts.length >= 2 ? efforts : []
-}
-
-function effortIndex(levels: readonly EffortLevel[], id: string | undefined): number {
-  return levels.findIndex((level) => level.id === id)
-}
-
-function clampIndex(value: number, count: number): number {
-  return Math.max(0, Math.min(count - 1, Math.round(value)))
-}
-
-/**
- * Level index the slider should rest at: the session's current effort when the
- * model still offers it, else the adapter default, else the middle level.
- */
-function effectiveEffortIndex(levels: readonly EffortLevel[], state: ModelDirectoryState): number {
-  const reasoning = currentModel(state)?.reasoning
-  const current = effortIndex(levels, state.current?.reasoningEffort)
-  if (current >= 0) return current
-  const fallback = effortIndex(levels, reasoning?.defaultEffort)
-  if (fallback >= 0) return fallback
-  return Math.floor((levels.length - 1) / 2)
 }
 
 interface RadiationState {
@@ -351,7 +427,7 @@ function drawRadiation(
   context.restore()
 }
 
-function EffortSlider({ directory }: { directory: ModelDirectory }) {
+function EffortSlider({ directory, t }: { directory: ModelDirectory; t: ReasoningEffortTranslate }) {
   const directoryState = useSyncExternalStore(
     (notify) => directory.store.subscribe(notify),
     () => directory.store.getSnapshot(),
@@ -367,17 +443,25 @@ function EffortSlider({ directory }: { directory: ModelDirectory }) {
   const inputRef = useRef<HTMLInputElement>(null)
   const committedRef = useRef('')
   const committingRef = useRef(false)
+  const selectionAbortRef = useRef<AbortController | null>(null)
   const previewRef = useRef(0)
   const draggingRef = useRef(false)
   const pointerActiveRef = useRef(false)
   const activePointerIdRef = useRef<number | null>(null)
+  const gestureCatalogRef = useRef('')
+  const materializedRef = useRef<string | null>(null)
+  const catalogKey = JSON.stringify([
+    directoryState.current?.provider,
+    directoryState.current?.model,
+    levels.map((level) => level.id),
+  ])
   const globalPointerMoveRef = useRef<((event: PointerEvent) => void) | null>(null)
   const globalPointerEndRef = useRef<((event: PointerEvent) => void) | null>(null)
   const globalPointerCancelRef = useRef<((event: PointerEvent) => void) | null>(null)
   const radiationRef = useRef<RadiationState>({ progress: 0.5, dragging: false })
   const redrawRef = useRef<(() => void) | null>(null)
   const available = directoryState.current !== null && levels.length >= 2
-  const busy = committing || directoryState.status === 'selecting'
+  const busy = committing || directoryState.status === 'selecting' || directoryState.status === 'loading'
   const error = localError ?? directoryState.error
 
   useEffect(() => {
@@ -388,8 +472,19 @@ function EffortSlider({ directory }: { directory: ModelDirectory }) {
     previewRef.current = index
     setEffort(next)
     setPreview(index)
-    setLocalError(null)
-  }, [available, levels, directoryState])
+  }, [available, levels, directoryState, committing, dragging])
+
+  useEffect(() => () => {
+    selectionAbortRef.current?.abort()
+    const input = inputRef.current
+    const pointerId = activePointerIdRef.current
+    if (input !== null && pointerId !== null && input.hasPointerCapture(pointerId)) {
+      input.releasePointerCapture(pointerId)
+    }
+    pointerActiveRef.current = false
+    activePointerIdRef.current = null
+    draggingRef.current = false
+  }, [directory, directoryState.current?.provider, directoryState.current?.model])
 
   useEffect(() => {
     directory.load().catch(() => undefined)
@@ -461,6 +556,11 @@ function EffortSlider({ directory }: { directory: ModelDirectory }) {
   }, [])
 
   const rollback = useCallback(() => {
+    const input = inputRef.current
+    const pointerId = activePointerIdRef.current
+    if (input !== null && pointerId !== null && input.hasPointerCapture(pointerId)) {
+      input.releasePointerCapture(pointerId)
+    }
     const previous = committedRef.current
     previewRef.current = Math.max(0, effortIndex(levels, previous))
     pointerActiveRef.current = false
@@ -471,70 +571,96 @@ function EffortSlider({ directory }: { directory: ModelDirectory }) {
     setDragging(false)
   }, [levels])
 
-  const commit = useCallback(async (raw: number) => {
-    if (committingRef.current) return
-    committingRef.current = true
-    const previous = committedRef.current
+  const cancelChangedGesture = useCallback(() => {
+    if (gestureCatalogRef.current === catalogKey) return false
+    rollback()
+    setLocalError(t('effort.catalogChanged'))
+    return true
+  }, [catalogKey, rollback, t])
 
+  useEffect(() => {
+    if (pointerActiveRef.current) cancelChangedGesture()
+  }, [cancelChangedGesture])
+
+  const commit = useCallback(async (raw: number) => {
+    if (committingRef.current || directoryState.current === null) return
+    const index = clampIndex(raw, levels.length)
+    const next = levels[index]?.id
+    if (next === undefined) return
+    const target = {
+      provider: directoryState.current.provider,
+      model: directoryState.current.model,
+      reasoningEffort: next,
+    }
+    const operation = new AbortController()
+    selectionAbortRef.current = operation
+    committingRef.current = true
     setDragging(false)
     setCommitting(true)
     setLocalError(null)
-
-    // Optimistic snap from the rendered levels keeps the thumb responsive
-    // while the directory round-trip revalidates against fresh data below.
-    const optimisticIndex = clampIndex(raw, levels.length)
-    const optimistic = levels[optimisticIndex]?.id
-    if (optimistic !== undefined) {
-      previewRef.current = optimisticIndex
-      setPreview(optimisticIndex)
-      setEffort(optimistic)
-    }
+    previewRef.current = index
+    setPreview(index)
+    setEffort(next)
 
     try {
-      const models = await directory.load()
-      const fresh: ModelDirectoryState = {
-        current: models.current,
-        routable: models.routable,
-        groups: models.groups,
-        failures: models.failures,
-        status: 'ready',
-        error: null,
-      }
-      const freshLevels = sliderLevels(fresh)
-      const index = clampIndex(raw, freshLevels.length)
-      const next = freshLevels[index]?.id
-      if (next === undefined) throw new Error('当前模型未提供推理强度档位')
-
-      previewRef.current = index
-      setPreview(index)
+      const confirmed = await selectEffort(directory, target, operation.signal, t)
+      if (selectionAbortRef.current !== operation) return
+      const confirmedIndex = effortIndex(sliderLevels(confirmed), next)
+      committedRef.current = next
+      previewRef.current = confirmedIndex
       setEffort(next)
-
-      await directory.select({
-        provider: models.current.provider,
-        model: models.current.model,
-        reasoningEffort: next,
-      })
-
-      const snapshot = directory.store.getSnapshot()
-      const accepted = effortIndex(freshLevels, snapshot.current?.reasoningEffort)
-      const settled = accepted >= 0 ? accepted : index
-      const settledId = freshLevels[settled]?.id ?? next
-      committedRef.current = settledId
-      previewRef.current = settled
-      setEffort(settledId)
-      setPreview(settled)
+      setPreview(confirmedIndex)
     } catch (cause) {
-      const restore = Math.max(0, effortIndex(levels, previous))
-      committedRef.current = previous
-      previewRef.current = restore
-      setEffort(previous)
-      setPreview(restore)
-      setLocalError(cause instanceof Error ? cause.message : String(cause))
+      if (!operation.signal.aborted) {
+        setLocalError(cause instanceof Error ? cause.message : String(cause))
+      }
     } finally {
+      if (selectionAbortRef.current === operation) {
+        selectionAbortRef.current = null
+        committingRef.current = false
+        // Synchronization below resumes with the current directory, including
+        // after a failed selection or a route change during the round-trip.
+        if (!operation.signal.aborted) setCommitting(false)
+      }
+    }
+  }, [directory, directoryState.current, levels, t])
+
+  useEffect(() => {
+    if (selectionAbortRef.current?.signal.aborted) {
+      selectionAbortRef.current = null
       committingRef.current = false
       setCommitting(false)
     }
-  }, [directory, levels])
+    materializedRef.current = null
+    setDragging(false)
+    setLocalError(null)
+  }, [directory, directoryState.current?.provider, directoryState.current?.model])
+
+  // The thumb only claims a level once the session holds it. A session with no
+  // effort for this route draws the adapter default or the middle notch, and
+  // without this the drawn level would be a guess while the request carried
+  // nothing and the backend picked for itself.
+  const pendingKey = JSON.stringify([
+    directoryState.current?.provider,
+    directoryState.current?.model,
+    levels.map((level) => level.id),
+  ])
+
+  useEffect(() => {
+    if (!available || committingRef.current || draggingRef.current) return
+    if (effortIndex(levels, directoryState.current?.reasoningEffort) >= 0) {
+      // Nothing to write back, and a later loss of the held level may try again.
+      materializedRef.current = null
+      return
+    }
+    if (materializedRef.current === pendingKey) return
+    const index = pendingEffortIndex(levels, directoryState)
+    if (index === undefined) return
+    // One attempt per route and catalog: a failed write-back must not retry in
+    // a loop, and the error it sets stays visible until a route change.
+    materializedRef.current = pendingKey
+    void commit(index)
+  }, [available, levels, directoryState, pendingKey, commit])
 
   const rawFromPointer = (input: HTMLInputElement, clientX: number) => {
     const bounds = input.getBoundingClientRect()
@@ -552,6 +678,9 @@ function EffortSlider({ directory }: { directory: ModelDirectory }) {
   }
 
   const beginDragging = (input: HTMLInputElement, pointerId: number, clientX: number) => {
+    if (committingRef.current || busy) return
+    gestureCatalogRef.current = catalogKey
+    setLocalError(null)
     pointerActiveRef.current = true
     activePointerIdRef.current = pointerId
     draggingRef.current = true
@@ -566,12 +695,14 @@ function EffortSlider({ directory }: { directory: ModelDirectory }) {
 
   const moveDragging = (input: HTMLInputElement, pointerId: number, clientX: number) => {
     if (!pointerActiveRef.current || activePointerIdRef.current !== pointerId) return
+    if (cancelChangedGesture()) return
     showPointerPreview(rawFromPointer(input, clientX))
   }
 
   const stopDragging = (input: HTMLInputElement, pointerId?: number, clientX?: number) => {
     if (!pointerActiveRef.current) return
     if (pointerId !== undefined && activePointerIdRef.current !== pointerId) return
+    if (cancelChangedGesture()) return
     const raw = clientX === undefined ? previewRef.current : rawFromPointer(input, clientX)
     pointerActiveRef.current = false
     activePointerIdRef.current = null
@@ -634,7 +765,9 @@ function EffortSlider({ directory }: { directory: ModelDirectory }) {
   const isTop = effortIndex(levels, effort) === count - 1
   const progress = preview / (count - 1) * 100
   const style = { '--re-progress': `${progress}%` } as CSSProperties
-  const title = error === null ? `推理强度 · ${effortName}` : `推理强度设置失败：${error}`
+  const title = error === null
+    ? t('effort.title', { effort: effortName })
+    : t('effort.failed', { error })
 
   return (
     <div
@@ -660,11 +793,13 @@ function EffortSlider({ directory }: { directory: ModelDirectory }) {
           step="0.01"
           value={preview}
           disabled={busy}
-          aria-label="推理强度"
+          aria-label={t('effort.label')}
           aria-valuetext={effortName}
           onChange={(event) => {
+            if (pointerActiveRef.current || committingRef.current) return
             const raw = Number(event.currentTarget.value)
             showPointerPreview(raw)
+            void commit(raw)
           }}
           onPointerDown={(event) => {
             event.preventDefault()
@@ -674,6 +809,7 @@ function EffortSlider({ directory }: { directory: ModelDirectory }) {
           onPointerMove={(event) => moveDragging(event.currentTarget, event.pointerId, event.clientX)}
           onPointerUp={(event) => stopDragging(event.currentTarget, event.pointerId, event.clientX)}
           onPointerCancel={(event) => {
+            if (!pointerActiveRef.current || activePointerIdRef.current !== event.pointerId) return
             if (event.currentTarget.hasPointerCapture(event.pointerId)) {
               event.currentTarget.releasePointerCapture(event.pointerId)
             }
@@ -699,6 +835,8 @@ function AdvancedModelSelect({
   load,
   select,
   adapt,
+  agentTutorial,
+  t,
 }: ModelSeatProps) {
   const state = useSyncExternalStore(
     (notify) => directory.subscribe(notify),
@@ -706,17 +844,33 @@ function AdvancedModelSelect({
   )
   const [open, setOpen] = useState(false)
   const [modelsOpen, setModelsOpen] = useState(false)
-  const [guidance, setGuidance] = useState<AdaptGuidance | null>(null)
+  const [guidanceResult, setGuidanceResult] = useState<AdaptGuidance | null>(null)
   const [guidanceBusy, setGuidanceBusy] = useState(false)
+  const [guidanceFailed, setGuidanceFailed] = useState(false)
   const [panelOpen, setPanelOpen] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [agentCopied, setAgentCopied] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => {
+    if (!open || rootRef.current === null || menuRef.current === null) return
+    return positionModelMenu(rootRef.current, menuRef.current)
+  }, [open])
   const choice = currentModel(state)
   const levels = sliderLevels(state)
-  const effortName = levels[effectiveEffortIndex(levels, state)]?.name ?? '默认'
-  const modelLabel = choice?.name ?? state.current?.model ?? '选择模型'
+  const effortName = levels[effectiveEffortIndex(levels, state)]?.name ?? t('model.defaultEffort')
+  const modelLabel = choice?.name ?? state.current?.model ?? t('model.select')
   const busy = state.status === 'loading' || state.status === 'selecting'
+  const provider = state.current?.provider
+  const modelId = state.current?.model
+  // Hide a previous model's result during the render before the effect clears it.
+  const guidance = guidanceResult?.provider === provider && guidanceResult?.model === modelId
+    ? guidanceResult
+    : null
+  const localizedNote = guidance === null ? '' : guidanceNote(guidance, t)
+  const localizedWarning = guidance === null ? null : guidanceWarning(guidance, t)
+  const localizedSnippet = guidance === null ? '' : guidanceSnippet(guidance, t)
 
   useEffect(() => {
     if (!available) return
@@ -735,25 +889,37 @@ function AdvancedModelSelect({
     return () => document.removeEventListener('mousedown', closeOutside)
   }, [open])
 
-  const provider = state.current?.provider
-  const modelId = state.current?.model
-
   useEffect(() => {
-    if (adapt === null || provider === undefined || modelId === undefined) {
-      setGuidance(null)
-      setPanelOpen(false)
+    // A brief belongs to the model it describes; never let a stale one be copied.
+    setGuidanceResult(null)
+    setCopied(false)
+    setAgentCopied(false)
+    setPanelOpen(false)
+    if (provider === undefined || modelId === undefined) {
+      setGuidanceBusy(false)
+      setGuidanceFailed(false)
+      return
+    }
+    // Without a channel the diagnosis cannot run at all; saying so beats
+    // rendering nothing, which reads as "this model needs no guidance".
+    if (adapt === null) {
+      setGuidanceBusy(false)
+      setGuidanceFailed(true)
       return
     }
     let cancelled = false
     setGuidanceBusy(true)
+    setGuidanceFailed(false)
     adapt.diagnose(provider, modelId).then((result) => {
       if (cancelled) return
-      setGuidance(result)
+      setGuidanceResult(result)
+      setGuidanceFailed(result === null)
       setGuidanceBusy(false)
       if (result === null || !result.needsGuide) setPanelOpen(false)
     }, () => {
       if (cancelled) return
-      setGuidance(null)
+      setGuidanceResult(null)
+      setGuidanceFailed(true)
       setGuidanceBusy(false)
     })
     return () => {
@@ -795,7 +961,7 @@ function AdvancedModelSelect({
         ref={triggerRef}
         type="button"
         className="re-model-trigger"
-        aria-label={`模型 ${modelLabel}，推理强度 ${effortName}`}
+        aria-label={t('model.aria', { model: modelLabel, effort: effortName })}
         aria-haspopup="menu"
         aria-expanded={open}
         title={`${modelLabel} · ${effortName}`}
@@ -815,15 +981,15 @@ function AdvancedModelSelect({
       </button>
 
       {open ? (
-        <div className="re-model-menu" role="menu" aria-label="模型与推理强度" aria-busy={busy}>
+        <div ref={menuRef} className="re-model-menu" role="menu" aria-label={t('model.menuAria')} aria-busy={busy}>
           {modelsOpen ? (
             <div className="re-model-pane">
               <button type="button" className="re-model-back" onClick={() => setModelsOpen(false)}>
                 <span aria-hidden="true">‹</span>
-                <span>选择模型</span>
+                <span>{t('model.select')}</span>
               </button>
               {state.status === 'loading' && state.groups.length === 0 ? (
-                <div className="re-model-status">正在加载模型…</div>
+                <div className="re-model-status">{t('model.loading')}</div>
               ) : null}
               {state.groups.map((group) => (
                 <section key={group.id}>
@@ -853,7 +1019,7 @@ function AdvancedModelSelect({
                 </section>
               ))}
               {state.status === 'ready' && state.groups.every((group) => group.models.length === 0) ? (
-                <div className="re-model-status">没有可用模型</div>
+                <div className="re-model-status">{t('model.none')}</div>
               ) : null}
               {state.error === null ? null : <div className="re-model-error">{state.error}</div>}
             </div>
@@ -861,21 +1027,28 @@ function AdvancedModelSelect({
             <>
               <div className="re-advanced">
                 {levels.length >= 2 ? (
-                  <EffortSlider directory={controller} />
+                  <EffortSlider directory={controller} t={t} />
                 ) : (
-                  <div className="re-model-status">当前模型未提供推理强度档位</div>
+                  <div className="re-model-status">{t('effort.unavailable')}</div>
                 )}
               </div>
               {guidance !== null && guidance.needsGuide ? (
                 <div className="re-adapt">
                   <div className="re-adapt-copy">
                     <div className="re-adapt-title">
-                      {guidance.reason === 'missing' ? '当前模型未提供推理强度档位' : '档位声明与知识库不一致'}
+                      {guidance.reason === 'missing' ? t('effort.unavailable') : t('guidance.mismatch')}
                     </div>
                     <div className="re-adapt-desc">
                       {guidance.matched
-                        ? `知识库记录该模型支持 ${levelsText(guidance.expected)}，目录当前为 ${levelsText(guidance.current)}。${guidance.note ?? ''}`
-                        : `目录当前为 ${levelsText(guidance.current)}。${guidance.note ?? ''}`}
+                        ? t('guidance.matched', {
+                            expected: levelsText(guidance.expected, t),
+                            current: levelsText(guidance.current, t),
+                            note: localizedNote,
+                          })
+                        : t('guidance.unmatched', {
+                            current: levelsText(guidance.current, t),
+                            note: localizedNote,
+                          })}
                     </div>
                   </div>
                   {panelOpen ? (
@@ -883,56 +1056,111 @@ function AdvancedModelSelect({
                       <div className="re-adapt-scroll">
                         {guidance.matched ? (
                           <div className="re-adapt-panel-line">
-                            <span className="re-adapt-arrow">{levelsText(guidance.current)}</span>
+                            <span className="re-adapt-arrow">{levelsText(guidance.current, t)}</span>
                             <span aria-hidden="true">→</span>
-                            <span className="re-adapt-arrow">{levelsText(guidance.expected)}</span>
+                            <span className="re-adapt-arrow">{levelsText(guidance.expected, t)}</span>
                           </div>
                         ) : null}
-                        {guidance.warning === null ? null : (
-                          <div className="re-adapt-warning">{guidance.warning}</div>
+                        <div className="re-adapt-howto">{t('guidance.howto')}</div>
+                        <div className="re-adapt-switch-intro">{t('guidance.switch.intro')}</div>
+                        <ul className="re-adapt-switches">
+                          <li>{t('guidance.switch.thinkingFormat')}</li>
+                          <li>{t('guidance.switch.reasoningEffort')}</li>
+                          <li>{t('guidance.switch.developerRole')}</li>
+                          <li>{t('guidance.switch.replay')}</li>
+                        </ul>
+                        {localizedWarning === null ? null : (
+                          <div className="re-adapt-warning">{localizedWarning}</div>
                         )}
-                        <div className="re-adapt-label">要粘贴的内容</div>
-                        <pre className="re-adapt-yaml">{guidance.snippet}</pre>
+                        <div className="re-adapt-label">{t('guidance.paste')}</div>
+                        <pre className="re-adapt-yaml">{localizedSnippet}</pre>
                         <div className="re-adapt-steps">
                           <span>
-                            1. 打开 settings.yaml
-                            {guidance.settingsPath === null ? '' : `（${guidance.settingsPath}）`}，
-                            在 <code>{guidance.entryPath}</code> 列表里找到 <code>{guidance.entryLine}</code>；
+                            {t('guidance.step1.open')}<code>{configDocumentName(guidance.settingsPath)}</code>
+                            {guidance.settingsPath === null ? '' : t('guidance.step1.path', { path: guidance.settingsPath })}
+                            {t('guidance.step1.find')}<code>{guidance.entryPath}</code>
+                            {t('guidance.step1.list')}<code>{guidance.entryLine}</code>{t('guidance.step1.end')}
                           </span>
                           {guidance.mode === 'replace' ? (
                             <span>
-                              2. 把原有 <code>{guidance.entryLine}</code> 条目整体替换为复制的内容（不要复制出第二个 <code>llm-pi-ai:</code> 根）；
+                              {t('guidance.step2.replacePrefix')}<code>{guidance.entryLine}</code>
+                              {t('guidance.step2.replaceSuffix')}
                             </span>
                           ) : (
                             <span>
-                              2. 该行末尾回车，粘贴上面复制的内容（缩进与 <code>id</code> 差 2 个空格；不要复制出第二个 <code>llm-pi-ai:</code> 根）；
+                              {t('guidance.step2.insertPrefix')}<code>id</code>
+                              {t('guidance.step2.insertSuffix')}
                             </span>
                           )}
-                          <span>3. 保存后自动生效；滑块未出现则重启 Web Host 并刷新页面。</span>
+                          <span>{t('guidance.step3')}</span>
                         </div>
                       </div>
                       <div className="re-adapt-actions">
                         <button
                           type="button"
                           className="re-adapt-apply"
+                          disabled={busy || guidanceBusy}
                           onClick={() => {
-                            void copyText(guidance.snippet).then((ok) => setCopied(ok))
+                            void copyText(localizedSnippet).then((ok) => setCopied(ok))
                           }}
                         >
-                          {copied ? '已复制 ✓' : '复制字段块'}
+                          {copied ? t('guidance.copied') : t('guidance.copy')}
+                        </button>
+                        <button
+                          type="button"
+                          className="re-adapt-agent"
+                          disabled={busy || guidanceBusy}
+                          onClick={() => {
+                            void copyText(agentBrief(guidance, agentTutorial(), t))
+                              .then((ok) => setAgentCopied(ok))
+                          }}
+                        >
+                          {agentCopied ? t('guidance.copied') : t('agent.copy')}
                         </button>
                         <button type="button" className="re-adapt-cancel" onClick={() => setPanelOpen(false)}>
-                          收起
+                          {t('guidance.collapse')}
                         </button>
                       </div>
                     </div>
                   ) : (
-                    <button type="button" className="re-adapt-open" onClick={() => { setCopied(false); setPanelOpen(true) }}>
-                      {guidanceBusy ? '检测中…' : '查看档位声明指引'}
-                    </button>
+                    <div className="re-adapt-open-row">
+                      <button type="button" className="re-adapt-open" onClick={() => { setCopied(false); setPanelOpen(true) }}>
+                        {guidanceBusy ? t('guidance.checking') : t('guidance.open')}
+                      </button>
+                      <button
+                        type="button"
+                        className="re-adapt-agent"
+                        disabled={busy || guidanceBusy}
+                        onClick={() => {
+                          void copyText(agentBrief(guidance, agentTutorial(), t))
+                            .then((ok) => setAgentCopied(ok))
+                        }}
+                      >
+                        {agentCopied ? t('guidance.copied') : t('agent.copy')}
+                      </button>
+                    </div>
                   )}
                 </div>
               ) : null}
+              {guidance !== null && guidance.userDeclared && !guidance.needsGuide ? (
+                <div className="re-adapt">
+                  <div className="re-adapt-desc">{t('agent.customize')}</div>
+                  <div className="re-adapt-open-row">
+                    <button
+                      type="button"
+                      className="re-adapt-agent"
+                      disabled={busy || guidanceBusy}
+                      onClick={() => {
+                        void copyText(agentBrief(guidance, agentTutorial(), t))
+                          .then((ok) => setAgentCopied(ok))
+                      }}
+                    >
+                      {agentCopied ? t('guidance.copied') : t('agent.copy')}
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+              {guidanceFailed ? <div className="re-model-status" role="status">{t('guidance.unavailable')}</div> : null}
               <div className="re-menu-separator" />
               <button
                 type="button"
@@ -954,21 +1182,21 @@ function AdvancedModelSelect({
   )
 }
 
-function ReasoningEffortSetting() {
+function ReasoningEffortSetting({ t }: PropsLocale<typeof NS>) {
   const enabled = useSyncExternalStore(enabledStore.subscribe, enabledStore.getSnapshot)
 
   return (
     <div className="re-setting-row">
       <div className="re-setting-copy">
-        <div className="re-setting-title">推理强度滑块</div>
-        <div className="re-setting-description">在模型菜单中显示推理强度滑块和动态辐射特效，档位随当前模型自动适配</div>
+        <div className="re-setting-title">{t('settings.effort.title')}</div>
+        <div className="re-setting-description">{t('settings.effort.description')}</div>
       </div>
       <div className="re-setting-control">
-        <span className="re-setting-state">{enabled ? '启用' : '停用'}</span>
+        <span className="re-setting-state">{enabled ? t('settings.enabled') : t('settings.disabled')}</span>
         <button
           type="button"
           role="switch"
-          aria-label="启用推理强度滑块"
+          aria-label={t('settings.effort.aria')}
           aria-checked={enabled}
           className={`re-setting-switch${enabled ? ' is-on' : ''}`}
           onClick={() => enabledStore.set(!enabled)}
@@ -980,22 +1208,22 @@ function ReasoningEffortSetting() {
   )
 }
 
-function ChibiThumbSetting() {
+function ChibiThumbSetting({ t }: PropsLocale<typeof NS>) {
   const sliderEnabled = useSyncExternalStore(enabledStore.subscribe, enabledStore.getSnapshot)
   const enabled = useSyncExternalStore(chibiThumbStore.subscribe, chibiThumbStore.getSnapshot)
 
   return (
     <div className="re-setting-row">
       <div className="re-setting-copy">
-        <div className="re-setting-title">大肥鱼滑块</div>
-        <div className="re-setting-description">用大肥鱼替换滑块按钮</div>
+        <div className="re-setting-title">{t('settings.chibi.title')}</div>
+        <div className="re-setting-description">{t('settings.chibi.description')}</div>
       </div>
       <div className="re-setting-control">
-        <span className="re-setting-state">{enabled ? '启用' : '停用'}</span>
+        <span className="re-setting-state">{enabled ? t('settings.enabled') : t('settings.disabled')}</span>
         <button
           type="button"
           role="switch"
-          aria-label="启用大肥鱼滑块"
+          aria-label={t('settings.chibi.aria')}
           aria-checked={enabled}
           disabled={!sliderEnabled}
           className={`re-setting-switch${enabled ? ' is-on' : ''}`}
@@ -1014,6 +1242,9 @@ export function apply(ctx: ClientContext) {
 
   const connection = ctx.get('connection') as { rpc?: HostRpc } | undefined
   const adapt = makeAdaptationService(connection?.rpc)
+  const locale = ctx.get('locale') as LocaleRuntimeLike | undefined
+
+  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'reasoning-effort: dictionaries')
 
   ctx.effect(() => {
     const style = document.createElement('style')
@@ -1037,14 +1268,14 @@ export function apply(ctx: ClientContext) {
 
   ctx.slots.inject(SETTINGS_SLOT, () =>
     ctx.slots.register(
-      { name: SETTINGS_SLOT, id: 'reasoning-effort-enabled', order: 15 },
+      { name: SETTINGS_SLOT, id: 'reasoning-effort-enabled', order: 15, locale: NS },
       ReasoningEffortSetting,
     ),
   )
 
   ctx.slots.inject(SETTINGS_SLOT, () =>
     ctx.slots.register(
-      { name: SETTINGS_SLOT, id: 'reasoning-effort-chibi-thumb', order: 16 },
+      { name: SETTINGS_SLOT, id: 'reasoning-effort-chibi-thumb', order: 16, locale: NS },
       ChibiThumbSetting,
     ),
   )
@@ -1062,15 +1293,19 @@ export function apply(ctx: ClientContext) {
         {
           name: SLOT,
           priority: -100,
-          inject: (sessionId: SessionId) => {
-            const controller = modelDirectories.directoryFor(sessionId)
+          locale: NS,
+          inject: (sessionId: string) => {
+            const controller = modelDirectories.directoryFor(sessionId as SessionId)
             return {
               available: true,
               controller,
               directory: controller.store,
               load: () => controller.load().then(() => undefined, () => undefined),
-              select: (selection: ModelSelection) => controller.select(selection).then(() => true, () => false),
+              select: (selection: ModelSelection) => controller.select(selection).then((result) => result.ok, () => false),
               adapt,
+              // Read at copy time: a language switch must change the next copy,
+              // not require the seat to remount.
+              agentTutorial: () => (locale?.getLocale().active === 'zh' ? agentTutorialZh : agentTutorialEn),
             }
           },
         },

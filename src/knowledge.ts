@@ -11,8 +11,13 @@
  * custom-provider models the directory does not describe. It never writes
  * settings itself and never overrides catalog-declared levels.
  *
- * `compat` is only meaningful for `openai-completions` routes; the snippet
- * generator carries it onto those routes and drops it elsewhere.
+ * A `compat` block is written verbatim into the generated snippet, and the
+ * generator never sees the route's protocol: it cannot withhold the block from
+ * a model whose wire protocol refuses those fields (`llm-pi-ai` rejects the
+ * whole route instead of ignoring them). Set `compat` only where every route an
+ * entry can match speaks `openai-completions`, and prefer leaving it out: an
+ * absent block lets the adapter read the endpoint address, which is right for
+ * an unrecognized endpoint and for a recognized vendor alike.
  *
  * @module dsh-reasoning-effort/knowledge
  */
@@ -30,11 +35,18 @@ export interface KnowledgeEntry {
   readonly provider: string
   /** Model id pattern; `*` matches any run of characters. */
   readonly model: string
-  /** Human-readable provenance note shown in the guidance panel. */
-  readonly note: string
+  /** User-authored provenance note shown verbatim; built-ins use `noteKey`. */
+  readonly note?: string
+  /** Stable built-in note key localized by the browser half. */
+  readonly noteKey?: 'glm52' | 'kimiK3'
   /** Declared levels: display level -> endpoint wire value (`null` pins unsupported). */
   readonly efforts: KnowledgeEfforts
-  /** Wire compat hints; carried only onto `openai-completions` routes. */
+  /**
+   * Wire compat hints for the generated snippet, written verbatim and only
+   * meaningful on an `openai-completions` route. The generator cannot check
+   * that, so an entry whose pattern can match another protocol must leave this
+   * out.
+   */
   readonly compat?: {
     readonly thinkingFormat?: string
     readonly supportsReasoningEffort?: boolean
@@ -47,7 +59,7 @@ export const BUILTIN_ENTRIES: readonly KnowledgeEntry[] = [
     id: 'glm-5.2',
     provider: '*',
     model: 'glm-5.2',
-    note: 'GLM-5.2 原生档位 minimal / low / medium / high（智谱 z.ai 深度思考文档）；阿里云百炼 OpenAI 兼容端点实测接受这些取值。',
+    noteKey: 'glm52',
     efforts: {
       minimal: 'minimal',
       low: 'low',
@@ -60,7 +72,7 @@ export const BUILTIN_ENTRIES: readonly KnowledgeEntry[] = [
     id: 'kimi-k3',
     provider: '*',
     model: 'kimi/kimi-k3',
-    note: 'Kimi K3 官方档位 low / high / max（Moonshot 思考力度文档），与 pi-ai 目录 moonshotai 条目一致。',
+    noteKey: 'kimiK3',
     efforts: {
       low: 'low',
       high: 'high',
@@ -72,7 +84,7 @@ export const BUILTIN_ENTRIES: readonly KnowledgeEntry[] = [
     id: 'kimi-k3-plain',
     provider: '*',
     model: 'kimi-k3',
-    note: 'Kimi K3 官方档位 low / high / max（Moonshot 思考力度文档），与 pi-ai 目录 moonshotai 条目一致。',
+    noteKey: 'kimiK3',
     efforts: {
       low: 'low',
       high: 'high',
